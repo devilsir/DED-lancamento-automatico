@@ -1,0 +1,25 @@
+DED+ Notas Widget — exceções de nomes
+
+Agora o comparador trata variações comuns, incluindo:
+
+- Lavynna / Lavyna / Lavynny / Lavynia
+- Isabela / Isabella / Izabela / Izabella / Isabelly
+- Luis / Luiz / Luísa / Luiza
+- Sousa / Souza
+- Vitor / Victor / Vitória / Victoria
+- Sofia / Sophia
+- Yasmin / Yasmim / Iasmin / Iasmim
+- Arthur / Artur
+- Alan / Allan / Allen
+- Felipe / Filipe / Philipe / Phelipe
+- Kevin / Kevyn / Keven
+- Nicolas / Nikolas / Nicholas / Nickolas
+- Rafael / Raphael
+- Thais / Tais
+- Wesley / Weslei
+- William / Wiliam / Willian / Wilian
+- Kauany / Kauane / Cauany / Cauane
+- e várias outras pequenas grafias.
+
+Regra de segurança:
+Mesmo com exceções, se dois alunos ficarem parecidos demais, o widget marca como ambíguo e não preenche automaticamente.

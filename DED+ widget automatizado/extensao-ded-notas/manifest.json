@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "DED+ Notas + Chamadas Widget",
+  "version": "1.0.0",
+  "description": "Widget local para preencher notas e lançar faltas no DED+ a partir de planilhas .xlsx ou .csv, com modelos em branco.",
+  "permissions": [],
+  "host_permissions": [
+    "https://dedmais.educacao.mg.gov.br/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://dedmais.educacao.mg.gov.br/*"
+      ],
+      "js": [
+        "pako_inflate.min.js",
+        "content-script.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "DED+ Notas + Chamadas Widget"
+  }
+}
