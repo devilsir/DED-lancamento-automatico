@@ -42,6 +42,7 @@
     "N", "NO", "NUM", "NUMERO", "NOME", "NOME DO ALUNO", "ALUNO", "ESTUDANTE",
     "TOTAL", "NOTA FINAL", "MEDIA", "MÉDIA", "%", "SITUACAO", "SITUAÇÃO",
     "OBS", "OBSERVACAO", "OBSERVAÇÃO", "OBSERVACOES", "OBSERVAÇÕES",
+    "MATRICULA", "MATRÍCULA", "REGISTRO", "ID", "CODIGO", "CÓDIGO",
     "MES", "MÊS", "ANO", "PROFESSOR", "PROFESSORA", "TURMA", "APROVACAO", "APROVAÇÃO"
   ]);
 
@@ -656,6 +657,243 @@
     return { data: output, warnings };
   }
 
+  function xmlSafe(value) {
+    return String(value ?? "")
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&apos;");
+  }
+
+  function xlsxInlineCell(ref, value, style = 0) {
+    if (value === null || value === undefined || value === "") return `<c r="${ref}"${style ? ` s="${style}"` : ""}/>`;
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return `<c r="${ref}"${style ? ` s="${style}"` : ""}><v>${value}</v></c>`;
+    }
+    const text = xmlSafe(value);
+    const preserve = /^\s|\s$/.test(String(value)) ? ' xml:space="preserve"' : "";
+    return `<c r="${ref}" t="inlineStr"${style ? ` s="${style}"` : ""}><is><t${preserve}>${text}</t></is></c>`;
+  }
+
+  function sanitizeSheetName(name, used) {
+    let base = String(name || "Turma").replace(/[\\\/\?\*\[\]:]/g, " ").replace(/\s+/g, " ").trim();
+    if (!base) base = "Turma";
+    base = base.slice(0, 31);
+    let candidate = base;
+    let n = 2;
+    while (used.has(candidate.toUpperCase())) {
+      const suffix = ` (${n++})`;
+      candidate = `${base.slice(0, Math.max(1, 31 - suffix.length))}${suffix}`;
+    }
+    used.add(candidate.toUpperCase());
+    return candidate;
+  }
+
+  function workbookRowsForTurma(turma) {
+    const activities = Object.keys(app.data?.[turma] || {});
+    const studentMap = new Map();
+    const order = [];
+
+    for (const activity of activities) {
+      for (const row of app.data[turma][activity]?.alunos || []) {
+        const key = canonicalName(row.nome) || normName(row.nome);
+        if (!key) continue;
+        if (!studentMap.has(key)) {
+          studentMap.set(key, { nome: row.nome, registro: row.registro || "", grades: {} });
+          order.push(key);
+        }
+        const student = studentMap.get(key);
+        if (!student.registro && row.registro) student.registro = row.registro;
+        student.grades[activity] = row;
+      }
+    }
+
+    const rows = [["N", "REGISTRO", "NOME DO ALUNO", ...activities]];
+    order.forEach((key, index) => {
+      const student = studentMap.get(key);
+      const values = activities.map(activity => {
+        const row = student.grades[activity];
+        if (!row) return "";
+        if (row.naoRealizada) return "NF";
+        if (row.semNota || row.nota === null || row.nota === undefined || row.nota === "") return "";
+        const n = Number(row.nota);
+        return Number.isFinite(n) ? n : String(row.nota);
+      });
+      rows.push([index + 1, student.registro || "", student.nome, ...values]);
+    });
+
+    return rows;
+  }
+
+  function sheetXmlFromRows(rows) {
+    const maxCols = Math.max(1, ...rows.map(r => r.length));
+    const maxRows = Math.max(1, rows.length);
+    const lastCell = `${cellIndexToCol(maxCols - 1)}${maxRows}`;
+    const xmlRows = rows.map((row, r) => {
+      const cells = [];
+      for (let c = 0; c < maxCols; c++) {
+        const ref = `${cellIndexToCol(c)}${r + 1}`;
+        cells.push(xlsxInlineCell(ref, row[c] ?? "", r === 0 ? 1 : 0));
+      }
+      return `<row r="${r + 1}">${cells.join("")}</row>`;
+    }).join("");
+
+    const activityCols = maxCols > 3 ? `<col min="4" max="${maxCols}" width="18" customWidth="1"/>` : "";
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<dimension ref="A1:${lastCell}"/>
+<sheetViews><sheetView workbookViewId="0"/></sheetViews>
+<sheetFormatPr defaultRowHeight="15"/>
+<cols><col min="1" max="1" width="6" customWidth="1"/><col min="2" max="2" width="15" customWidth="1"/><col min="3" max="3" width="42" customWidth="1"/>${activityCols}</cols>
+<sheetData>${xmlRows}</sheetData>
+<autoFilter ref="A1:${lastCell}"/>
+</worksheet>`;
+  }
+
+  function crc32Bytes(bytes) {
+    let crc = 0xFFFFFFFF;
+    for (let i = 0; i < bytes.length; i++) {
+      crc ^= bytes[i];
+      for (let j = 0; j < 8; j++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xEDB88320 : 0);
+    }
+    return (crc ^ 0xFFFFFFFF) >>> 0;
+  }
+
+  function concatBytes(parts) {
+    const total = parts.reduce((sum, p) => sum + p.length, 0);
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (const part of parts) { out.set(part, offset); offset += part.length; }
+    return out;
+  }
+
+  function zipStored(entries) {
+    const encoder = new TextEncoder();
+    const localParts = [];
+    const centralParts = [];
+    let offset = 0;
+    const now = new Date();
+    const dosTime = ((now.getHours() & 31) << 11) | ((now.getMinutes() & 63) << 5) | ((Math.floor(now.getSeconds() / 2)) & 31);
+    const dosDate = (((Math.max(1980, now.getFullYear()) - 1980) & 127) << 9) | (((now.getMonth() + 1) & 15) << 5) | (now.getDate() & 31);
+
+    const u16 = value => { const b = new Uint8Array(2); new DataView(b.buffer).setUint16(0, value & 0xFFFF, true); return b; };
+    const u32 = value => { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, value >>> 0, true); return b; };
+
+    for (const entry of entries) {
+      const name = encoder.encode(entry.name);
+      const data = entry.data instanceof Uint8Array ? entry.data : encoder.encode(String(entry.data ?? ""));
+      const crc = crc32Bytes(data);
+      const local = concatBytes([
+        u32(0x04034b50), u16(20), u16(0), u16(0), u16(dosTime), u16(dosDate),
+        u32(crc), u32(data.length), u32(data.length), u16(name.length), u16(0), name, data
+      ]);
+      localParts.push(local);
+
+      const central = concatBytes([
+        u32(0x02014b50), u16(20), u16(20), u16(0), u16(0), u16(dosTime), u16(dosDate),
+        u32(crc), u32(data.length), u32(data.length), u16(name.length), u16(0), u16(0),
+        u16(0), u16(0), u32(0), u32(offset), name
+      ]);
+      centralParts.push(central);
+      offset += local.length;
+    }
+
+    const localBytes = concatBytes(localParts);
+    const centralBytes = concatBytes(centralParts);
+    const eocd = concatBytes([
+      u32(0x06054b50), u16(0), u16(0), u16(entries.length), u16(entries.length),
+      u32(centralBytes.length), u32(localBytes.length), u16(0)
+    ]);
+    return concatBytes([localBytes, centralBytes, eocd]);
+  }
+
+  function buildGradesWorkbookBlob() {
+    const turmas = Object.keys(app.data || {}).filter(t => Object.keys(app.data[t] || {}).length);
+    if (!turmas.length) throw new Error("Não há notas para exportar.");
+
+    const usedNames = new Set();
+    const sheetDefs = turmas.map((turma, i) => ({
+      turma,
+      id: i + 1,
+      name: sanitizeSheetName(turma, usedNames),
+      rows: workbookRowsForTurma(turma)
+    }));
+
+    const workbookSheets = sheetDefs.map(s => `<sheet name="${xmlSafe(s.name)}" sheetId="${s.id}" r:id="rId${s.id}"/>`).join("");
+    const workbookRels = sheetDefs.map(s => `<Relationship Id="rId${s.id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${s.id}.xml"/>`).join("");
+    const styleRid = sheetDefs.length + 1;
+    const sheetOverrides = sheetDefs.map(s => `<Override PartName="/xl/worksheets/sheet${s.id}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join("");
+
+    const entries = [
+      { name: "[Content_Types].xml", data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+${sheetOverrides}
+<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+</Types>` },
+      { name: "_rels/.rels", data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>` },
+      { name: "xl/workbook.xml", data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheets>${workbookSheets}</sheets>
+</workbook>` },
+      { name: "xl/_rels/workbook.xml.rels", data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+${workbookRels}
+<Relationship Id="rId${styleRid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>` },
+      { name: "xl/styles.xml", data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<fonts count="2"><font><sz val="11"/><name val="Calibri"/><family val="2"/></font><font><b/><sz val="11"/><name val="Calibri"/><family val="2"/></font></fonts>
+<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
+<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs>
+<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+</styleSheet>` }
+    ];
+
+    sheetDefs.forEach(s => entries.push({ name: `xl/worksheets/sheet${s.id}.xml`, data: sheetXmlFromRows(s.rows) }));
+    const bytes = zipStored(entries);
+    return new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  }
+
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }
+
+  function updatedWorkbookName() {
+    const raw = String(app.fileName || "").trim();
+    if (!raw || /capturad/i.test(raw)) return "DED_notas_capturadas.xlsx";
+    const base = raw.replace(/\.(xlsx|csv)$/i, "").replace(/[^a-z0-9_\- áàâãéêíóôõúçº]/gi, "").trim() || "DED_notas";
+    return `${base}_atualizada.xlsx`;
+  }
+
+  function exportGradesWorkbook() {
+    try {
+      const blob = buildGradesWorkbookBlob();
+      const filename = updatedWorkbookName();
+      downloadBlob(blob, filename);
+      logMessage(`✅ Planilha exportada: <b>${esc(filename)}</b>. Ela contém nome do aluno, registro e todas as atividades guardadas no widget.`);
+    } catch (err) {
+      console.error(err);
+      logMessage(`❌ Não consegui exportar a planilha: ${esc(err.message || err)}`);
+    }
+  }
+
 
   function downloadBase64Xlsx(base64, filename) {
     try {
@@ -1165,6 +1403,238 @@
     return activities[0] || "";
   }
 
+  function pageLinesWithoutWidget() {
+    const panel = document.getElementById("dedNotasPanel");
+    const oldDisplay = panel?.style.display;
+    if (panel) panel.style.display = "none";
+    const lines = (document.body.innerText || "").split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+    if (panel) panel.style.display = oldDisplay || "";
+    return lines;
+  }
+
+  function detectDedActivityMeta() {
+    const lines = pageLinesWithoutWidget();
+    let title = "";
+    let valor = null;
+    let dataCadastro = "";
+    let divisao = "";
+    let tipo = "";
+
+    const valueIndex = lines.findIndex(line => norm(line).includes("VALOR DA ATIVIDADE"));
+    if (valueIndex >= 0) {
+      const valueLine = lines[valueIndex];
+      const m = valueLine.replace(/\./g, "").replace(",", ".").match(/VALOR\s+DA\s+ATIVIDADE\s*:?\s*(-?\d+(?:\.\d+)?)/i);
+      if (m) valor = Number(m[1]);
+      for (let i = valueIndex - 1; i >= Math.max(0, valueIndex - 5); i--) {
+        const candidate = lines[i].trim();
+        const n = norm(candidate);
+        if (!candidate || n.includes("AVALIACOES") || n.includes("LANCAR NOTAS") || n.includes("LINGUA INGLESA")) continue;
+        title = candidate;
+        break;
+      }
+    }
+
+    for (const line of lines) {
+      const n = norm(line);
+      if (!dataCadastro && n.startsWith("DATA DE CADASTRO")) dataCadastro = line.split(":").slice(1).join(":").trim();
+      if (!divisao && n.startsWith("DIVISAO DA ATIVIDADE")) divisao = line.split(":").slice(1).join(":").trim();
+      if (!tipo && n.startsWith("TIPO ")) tipo = line.split(":").slice(1).join(":").trim();
+    }
+
+    if (!title) {
+      const existing = detectActivityFromPage(detectTurmaFromPage());
+      title = existing || `Atividade DED ${new Date().toLocaleDateString("pt-BR")}`;
+    }
+
+    return { title: title.replace(/\s+/g, " ").trim(), valor, dataCadastro, divisao, tipo };
+  }
+
+  function findStudentGradeCardForRead(input) {
+    let best = null;
+    let cur = input;
+    for (let i = 0; i < 12 && cur && cur !== document.body; i++, cur = cur.parentElement) {
+      if (cur.closest?.("#dedNotasPanel")) return null;
+      const txt = norm(cur.innerText || cur.textContent || "");
+      if (!txt.includes("NOTA")) continue;
+      const rect = cur.getBoundingClientRect?.();
+      if (!rect || rect.width < 250 || rect.height < 45 || rect.height > 240) continue;
+      const looksLikeStudent = txt.includes("NAO REALIZADA") || txt.includes("RECUPERACAO PARALELA") || txt.includes("NOTAS DO ALUNO");
+      if (!looksLikeStudent) continue;
+      best = cur;
+      const controls = [...cur.querySelectorAll("input, textarea")].filter(el => !["checkbox", "radio", "hidden", "button", "submit", "file"].includes((el.type || "text").toLowerCase()));
+      if (controls.length >= 1 && controls.length <= 4) return cur;
+    }
+    return best;
+  }
+
+  function findGradeInputForRead(card) {
+    const inputs = [...card.querySelectorAll("input, textarea")].filter(input => {
+      const type = (input.type || "text").toLowerCase();
+      return !["checkbox", "radio", "hidden", "button", "submit", "file"].includes(type) && !input.closest("#dedNotasPanel");
+    });
+    if (!inputs.length) return null;
+
+    const byLabel = inputs.find(input => {
+      const around = controlLabelText(input);
+      return around.includes("NOTA") && !around.includes("RECUPERACAO");
+    });
+    if (byLabel) return byLabel;
+
+    return inputs.slice().sort((a, b) => {
+      const ar = a.getBoundingClientRect();
+      const br = b.getBoundingClientRect();
+      return ar.left - br.left || ar.top - br.top;
+    })[0];
+  }
+
+  function isNaoRealizadaCheckedForRead(card) {
+    const nativeChecks = [...card.querySelectorAll('input[type="checkbox"]')];
+    const explicit = nativeChecks.find(cb => controlLabelText(cb).includes("NAO REALIZADA"));
+    if (explicit) return !!explicit.checked;
+    if (norm(card.innerText || "").includes("NAO REALIZADA") && nativeChecks.some(cb => cb.checked)) return true;
+    const ariaChecked = [...card.querySelectorAll('[role="checkbox"][aria-checked="true"]')].find(el => controlLabelText(el).includes("NAO REALIZADA"));
+    return !!ariaChecked;
+  }
+
+  function extractStudentIdentityFromCard(card) {
+    const raw = card.innerText || card.textContent || "";
+    const registro = raw.match(/\b\d{6,12}\b/)?.[0] || "";
+    const forbidden = ["NOTA", "RECUPERACAO", "NAO REALIZADA", "NOTAS DO ALUNO", "SALVAR", "PONTOS"];
+    const validName = text => {
+      const cleaned = String(text || "").replace(/^\s*\d{6,12}\s*/, "").replace(/\s+/g, " ").trim();
+      const n = norm(cleaned);
+      if (!cleaned || cleaned.length < 4 || cleaned.length > 140) return "";
+      if (forbidden.some(word => n.includes(word))) return "";
+      if (!/[A-Za-zÀ-ÿ]/.test(cleaned)) return "";
+      const tokens = cleaned.split(/\s+/).filter(Boolean);
+      if (tokens.length < 2) return "";
+      return cleaned;
+    };
+
+    const anchors = [...card.querySelectorAll("a, [role=link]")].map(el => validName(el.textContent)).filter(Boolean);
+    if (anchors.length) return { nome: anchors.sort((a, b) => b.length - a.length)[0], registro };
+
+    const lines = raw.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+    for (const line of lines) {
+      const candidate = validName(line);
+      if (candidate) return { nome: candidate, registro };
+    }
+
+    const beforeNota = raw.split(/\bNota\s*:/i)[0];
+    const candidate = validName(beforeNota);
+    return { nome: candidate, registro };
+  }
+
+  function parseDedGradeValue(raw) {
+    const text = String(raw ?? "").trim();
+    if (!text || text === "-" || text === "—") return null;
+    const normalized = text.replace(/\s/g, "").replace(/\./g, "").replace(",", ".");
+    const m = normalized.match(/-?\d+(?:\.\d+)?/);
+    if (!m) return null;
+    const n = Number(m[0]);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function readCurrentDedActivity() {
+    const turma = detectTurmaFromPage() || "Turma DED";
+    const meta = detectDedActivityMeta();
+    const cards = [];
+    const seenCards = new Set();
+
+    for (const input of document.querySelectorAll("input, textarea")) {
+      if (input.closest?.("#dedNotasPanel")) continue;
+      const type = (input.type || "text").toLowerCase();
+      if (["checkbox", "radio", "hidden", "button", "submit", "file"].includes(type)) continue;
+      const card = findStudentGradeCardForRead(input);
+      if (!card || seenCards.has(card)) continue;
+      seenCards.add(card);
+      cards.push(card);
+    }
+
+    const alunos = [];
+    const seenStudents = new Set();
+    for (const card of cards) {
+      const identity = extractStudentIdentityFromCard(card);
+      if (!identity.nome) continue;
+      const key = canonicalName(identity.nome) || normName(identity.nome);
+      if (!key || seenStudents.has(key)) continue;
+      seenStudents.add(key);
+
+      const input = findGradeInputForRead(card);
+      const naoRealizada = isNaoRealizadaCheckedForRead(card);
+      const nota = naoRealizada ? 0 : parseDedGradeValue(input?.value ?? input?.getAttribute?.("value") ?? "");
+      alunos.push({
+        nome: identity.nome,
+        registro: identity.registro,
+        nota,
+        naoRealizada,
+        semNota: !naoRealizada && nota === null,
+        origem: "DED+"
+      });
+    }
+
+    return { turma, atividade: meta.title, meta, alunos };
+  }
+
+  function mergeCapturedDedActivity(capture) {
+    if (!capture.alunos.length) throw new Error("Não encontrei cartões de alunos com o campo Nota nessa tela do DED+.");
+    if (!app.data) app.data = {};
+    if (!app.data[capture.turma]) app.data[capture.turma] = {};
+
+    const current = app.data[capture.turma][capture.atividade] || { rotulo: capture.atividade, alunos: [] };
+    const merged = new Map();
+    const order = [];
+    for (const row of current.alunos || []) {
+      const key = canonicalName(row.nome) || normName(row.nome);
+      if (!key || merged.has(key)) continue;
+      merged.set(key, { ...row });
+      order.push(key);
+    }
+    for (const row of capture.alunos) {
+      const key = canonicalName(row.nome) || normName(row.nome);
+      if (!key) continue;
+      if (!merged.has(key)) order.push(key);
+      merged.set(key, { ...(merged.get(key) || {}), ...row });
+    }
+
+    app.data[capture.turma][capture.atividade] = {
+      ...current,
+      rotulo: capture.atividade,
+      valor: capture.meta.valor,
+      dataCadastro: capture.meta.dataCadastro,
+      divisao: capture.meta.divisao,
+      tipo: capture.meta.tipo,
+      origem: "DED+",
+      alunos: order.map(key => merged.get(key))
+    };
+    if (!app.fileName) app.fileName = "DED_notas_capturadas.xlsx";
+    saveData();
+    refreshPanelData();
+
+    const turmaSelect = document.getElementById("dedNotasTurma");
+    const atvSelect = document.getElementById("dedNotasAtv");
+    if (turmaSelect && [...turmaSelect.options].some(o => o.value === capture.turma)) {
+      turmaSelect.value = capture.turma;
+      refreshActivities();
+      if (atvSelect && [...atvSelect.options].some(o => o.value === capture.atividade)) atvSelect.value = capture.atividade;
+    }
+  }
+
+  function captureDedActivityToSheet() {
+    try {
+      const capture = readCurrentDedActivity();
+      mergeCapturedDedActivity(capture);
+      const grades = capture.alunos.filter(a => !a.semNota && !a.naoRealizada).length;
+      const nf = capture.alunos.filter(a => a.naoRealizada).length;
+      const blanks = capture.alunos.filter(a => a.semNota).length;
+      const valor = Number.isFinite(capture.meta.valor) ? ` · valor ${capture.meta.valor}` : "";
+      logMessage(`✅ <b>${esc(capture.atividade)}</b> (${esc(capture.turma)}) lida do DED+${valor}.<br><b>${capture.alunos.length}</b> aluno(s): ${grades} nota(s), ${nf} não realizada(s), ${blanks} sem nota.<br>A atividade foi guardada na planilha do widget. Clique em <b>Baixar planilha atualizada</b> para salvar o .xlsx.`);
+    } catch (err) {
+      console.error(err);
+      logMessage(`❌ ${esc(err.message || err)}`);
+    }
+  }
+
   function getSelectedOptions() {
     const turma = document.getElementById("dedNotasTurma")?.value || detectTurmaFromPage();
     const atividade = document.getElementById("dedNotasAtv")?.value || detectActivityFromPage(turma);
@@ -1225,6 +1695,12 @@
       if (!input) {
         report.semInput.push(row.nome);
         markCard(card, "bad");
+        continue;
+      }
+
+      if (row.semNota || row.nota === null || row.nota === undefined || row.nota === "") {
+        report.semInput.push(`${row.nome} (sem nota na planilha)`);
+        markCard(card, "warn");
         continue;
       }
 
@@ -1750,7 +2226,7 @@
       <div id="dedNotasDrag" style="cursor:move; background:linear-gradient(135deg,#70417b,#8d5a97); color:#fff; padding:13px 15px; display:flex; align-items:center; justify-content:space-between; gap:10px;">
         <div>
           <div style="font-weight:900; font-size:16px; letter-spacing:.2px;">DED+ Notas + Chamadas</div>
-          <div style="font-size:11px; opacity:.86;">lê XLSX/CSV · notas · faltas · modelos em branco</div>
+          <div style="font-size:11px; opacity:.86;">XLSX/CSV ↔ DED+ · notas · faltas · captura de atividades</div>
         </div>
         <div style="display:flex; gap:6px;">
           <button id="dedNotasMin" title="Minimizar" style="border:0; background:rgba(255,255,255,.18); color:#fff; border-radius:10px; padding:5px 9px; cursor:pointer; font-weight:900;">–</button>
@@ -1786,6 +2262,15 @@
           <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:12px;">
             <button id="dedNotasCheck" style="background:#f0e2f4; color:#70417b; border:0; border-radius:12px; padding:10px; font-weight:900; cursor:pointer;">Analisar notas</button>
             <button id="dedNotasFill" style="background:#5f8f4e; color:#fff; border:0; border-radius:12px; padding:10px; font-weight:900; cursor:pointer;">Preencher notas</button>
+          </div>
+
+          <div style="border-top:1px solid #ead8ef; margin-top:12px; padding-top:12px;">
+            <div style="font-size:12px; font-weight:900; color:#5b2b66; margin-bottom:4px;">DED+ → planilha</div>
+            <div style="font-size:11px; color:#6a5970; margin-bottom:9px;">Na tela de uma atividade, lê automaticamente <b>nome do aluno + registro + Nota</b> e guarda como uma coluna da turma. “Não realizada” vira <b>NF</b>.</div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+              <button id="dedNotasReadDed" style="background:#4d7fa8; color:#fff; border:0; border-radius:12px; padding:10px; font-weight:900; cursor:pointer;">Ler atividade do DED</button>
+              <button id="dedNotasExportCurrent" style="background:#70417b; color:#fff; border:0; border-radius:12px; padding:10px; font-weight:900; cursor:pointer;">Baixar planilha atualizada</button>
+            </div>
           </div>
         </section>
 
@@ -1902,6 +2387,8 @@
       if (!app.data) return logMessage("Carrega a planilha de notas primeiro, mona.");
       renderLog(fillOnce(getSelectedOptions(), false));
     });
+    panel.querySelector("#dedNotasReadDed").addEventListener("click", captureDedActivityToSheet);
+    panel.querySelector("#dedNotasExportCurrent").addEventListener("click", exportGradesWorkbook);
 
     panel.querySelector("#dedCallCheck").addEventListener("click", () => {
       if (!app.callData) return logMessage("Carrega a planilha de chamada primeiro, mona.");
