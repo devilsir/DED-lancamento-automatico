@@ -231,6 +231,9 @@
 
   function normalizeTurma(value) {
     const s = norm(value);
+    // Formato usado pelo DED+, ex.: "6º EF AF REG 2 (2026)".
+    const ded = s.match(/\b([6-9])\s*O?\s*EF\s*AF\s*REG\s*([12])\b/);
+    if (ded) return `${ded[1]}º${ded[2]}`;
     const m = s.match(/\b([6-9])\s*O?\s*(?:ANO|EF|AF|REG)?\s*([12])\b/) || s.match(/\b([6-9])\s*([12])\b/);
     if (m) return `${m[1]}º${m[2]}`;
     const m2 = s.match(/TURMA\s*([6-9])\s*O?\s*([12])\b/);
@@ -691,36 +694,202 @@
     return candidate;
   }
 
-  function workbookRowsForTurma(turma) {
-    const activities = Object.keys(app.data?.[turma] || {});
+  function cleanDuplicateActivitySuffix(title) {
+    return String(title || "")
+      .replace(/\s*·\s*coluna\s+[A-Z]+\s*$/i, "")
+      .replace(/\s*·\s*\d+\s*$/i, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function exportGradeValue(row) {
+    if (!row) return "";
+    if (row.naoRealizada) return "NF";
+    if (row.semNota || row.nota === null || row.nota === undefined || row.nota === "") return "";
+    const n = Number(row.nota);
+    return Number.isFinite(n) && String(row.nota).trim() !== "" ? n : String(row.nota);
+  }
+
+  function exportRowIdentity(row) {
+    const registro = String(row?.registro || "").replace(/\D/g, "");
+    const nome = canonicalName(row?.nome) || normName(row?.nome);
+    return { registro, nome };
+  }
+
+  function rowsByNameForExport(rows) {
+    const map = new Map();
+    for (const row of rows || []) {
+      const id = exportRowIdentity(row);
+      if (!id.nome && !id.registro) continue;
+      const key = id.nome || `REG:${id.registro}`;
+      const prev = map.get(key);
+      if (!prev) {
+        map.set(key, row);
+        continue;
+      }
+      const prevValue = exportGradeValue(prev);
+      const nextValue = exportGradeValue(row);
+      // Prefere a linha que realmente tem dado; em empate, a mais nova vence.
+      if (nextValue !== "" || prevValue === "") map.set(key, { ...prev, ...row });
+      else if (!prev.registro && row.registro) map.set(key, { ...row, ...prev, registro: row.registro });
+    }
+    return map;
+  }
+
+  function activityRowsCompatibleForExport(aRows, bRows) {
+    const a = rowsByNameForExport(aRows);
+    const b = rowsByNameForExport(bRows);
+    if (!a.size || !b.size) return false;
+    let common = 0;
+    let conflicts = 0;
+    for (const [key, ar] of a) {
+      const br = b.get(key);
+      if (!br) continue;
+      common++;
+      const av = exportGradeValue(ar);
+      const bv = exportGradeValue(br);
+      if (av !== "" && bv !== "" && String(av) !== String(bv)) conflicts++;
+    }
+    const overlap = common / Math.max(1, Math.min(a.size, b.size));
+    return common >= 1 && conflicts === 0 && overlap >= 0.6;
+  }
+
+  function mergeActivityRowsForExport(baseRows, incomingRows) {
+    const map = new Map();
+    const order = [];
+    const aliasesByRegistro = new Map();
+    const aliasesByNome = new Map();
+
+    const add = row => {
+      const id = exportRowIdentity(row);
+      if (!id.nome && !id.registro) return;
+      let key = (id.registro && aliasesByRegistro.get(id.registro)) || (id.nome && aliasesByNome.get(id.nome));
+      if (!key) {
+        key = id.registro ? `R:${id.registro}` : `N:${id.nome}`;
+        if (!map.has(key)) order.push(key);
+      }
+      const prev = map.get(key) || {};
+      const prevValue = exportGradeValue(prev);
+      const nextValue = exportGradeValue(row);
+      let merged = { ...prev, ...row };
+      if (nextValue === "" && prevValue !== "") merged = { ...row, ...prev };
+      if (!merged.registro && row.registro) merged.registro = row.registro;
+      map.set(key, merged);
+      if (id.registro) aliasesByRegistro.set(id.registro, key);
+      if (id.nome) aliasesByNome.set(id.nome, key);
+    };
+
+    (baseRows || []).forEach(add);
+    (incomingRows || []).forEach(add);
+    return order.map(key => map.get(key));
+  }
+
+  function exportActivitiesForTurmas(sourceTurmas) {
+    const defs = [];
+    const usedTitles = new Set();
+
+    for (const sourceTurma of sourceTurmas) {
+      for (const [activityName, activityData] of Object.entries(app.data?.[sourceTurma] || {})) {
+        const title = String(activityName || activityData?.rotulo || "Atividade").trim() || "Atividade";
+        const titleNorm = norm(title);
+        const baseTitle = cleanDuplicateActivitySuffix(title) || title;
+        const baseNorm = norm(baseTitle);
+        const rows = activityData?.alunos || [];
+
+        // 1) Mesmo título normalizado = mesma coluna lógica. Mescla e deixa a captura mais recente atualizar.
+        let existing = defs.find(d => d.titleNorm === titleNorm);
+        if (existing) {
+          existing.rows = mergeActivityRowsForExport(existing.rows, rows);
+          existing.data = { ...existing.data, ...activityData, alunos: existing.rows };
+          continue;
+        }
+
+        // 2) Sufixos criados automaticamente pelo leitor (· 2 / · coluna D) só são colapsados
+        // quando os valores são compatíveis. Isso limpa duplicatas antigas sem apagar duas atividades reais.
+        const generatedSuffix = baseTitle !== title;
+        if (generatedSuffix) {
+          existing = defs.find(d => d.baseNorm === baseNorm && activityRowsCompatibleForExport(d.rows, rows));
+          if (existing) {
+            existing.rows = mergeActivityRowsForExport(existing.rows, rows);
+            existing.data = { ...existing.data, ...activityData, alunos: existing.rows };
+            continue;
+          }
+        }
+
+        let exportTitle = generatedSuffix ? title : baseTitle;
+        let exportNorm = norm(exportTitle);
+        if (usedTitles.has(exportNorm)) {
+          let n = 2;
+          while (usedTitles.has(norm(`${baseTitle} · ${n}`))) n++;
+          exportTitle = `${baseTitle} · ${n}`;
+          exportNorm = norm(exportTitle);
+        }
+        usedTitles.add(exportNorm);
+        defs.push({
+          title: exportTitle,
+          titleNorm: exportNorm,
+          baseTitle,
+          baseNorm,
+          rows: [...rows],
+          data: activityData || {}
+        });
+      }
+    }
+    return defs;
+  }
+
+  function exportTurmaGroups() {
+    const groups = new Map();
+    for (const rawTurma of Object.keys(app.data || {})) {
+      if (!Object.keys(app.data?.[rawTurma] || {}).length) continue;
+      const normalized = normalizeTurma(rawTurma);
+      const isSchoolTurma = /^[6-9]º[12]$/.test(normalized);
+      const key = isSchoolTurma ? normalized : (norm(rawTurma) || rawTurma);
+      if (!groups.has(key)) groups.set(key, { label: isSchoolTurma ? normalized : rawTurma, sources: [] });
+      groups.get(key).sources.push(rawTurma);
+    }
+    return [...groups.values()];
+  }
+
+  function workbookRowsForTurma(turma, sourceTurmas = [turma]) {
+    const activities = exportActivitiesForTurmas(sourceTurmas);
     const studentMap = new Map();
+    const byRegistro = new Map();
+    const byNome = new Map();
     const order = [];
 
+    const ensureStudent = row => {
+      const id = exportRowIdentity(row);
+      if (!id.nome && !id.registro) return null;
+      let key = (id.registro && byRegistro.get(id.registro)) || (id.nome && byNome.get(id.nome));
+      if (!key) {
+        key = id.registro ? `R:${id.registro}` : `N:${id.nome}`;
+        studentMap.set(key, { nome: row.nome || "", registro: row.registro || "", grades: {} });
+        order.push(key);
+      }
+      const student = studentMap.get(key);
+      if ((!student.nome || student.nome.length < String(row.nome || "").length) && row.nome) student.nome = row.nome;
+      if (!student.registro && row.registro) student.registro = row.registro;
+      if (id.registro) byRegistro.set(id.registro, key);
+      if (id.nome) byNome.set(id.nome, key);
+      return student;
+    };
+
     for (const activity of activities) {
-      for (const row of app.data[turma][activity]?.alunos || []) {
-        const key = canonicalName(row.nome) || normName(row.nome);
-        if (!key) continue;
-        if (!studentMap.has(key)) {
-          studentMap.set(key, { nome: row.nome, registro: row.registro || "", grades: {} });
-          order.push(key);
-        }
-        const student = studentMap.get(key);
-        if (!student.registro && row.registro) student.registro = row.registro;
-        student.grades[activity] = row;
+      for (const row of activity.rows || []) {
+        const student = ensureStudent(row);
+        if (!student) continue;
+        const current = student.grades[activity.title];
+        const currentValue = exportGradeValue(current);
+        const nextValue = exportGradeValue(row);
+        if (!current || nextValue !== "" || currentValue === "") student.grades[activity.title] = row;
       }
     }
 
-    const rows = [["N", "REGISTRO", "NOME DO ALUNO", ...activities]];
+    const rows = [["N", "REGISTRO", "NOME DO ALUNO", ...activities.map(a => a.title)]];
     order.forEach((key, index) => {
       const student = studentMap.get(key);
-      const values = activities.map(activity => {
-        const row = student.grades[activity];
-        if (!row) return "";
-        if (row.naoRealizada) return "NF";
-        if (row.semNota || row.nota === null || row.nota === undefined || row.nota === "") return "";
-        const n = Number(row.nota);
-        return Number.isFinite(n) ? n : String(row.nota);
-      });
+      const values = activities.map(activity => exportGradeValue(student.grades[activity.title]));
       rows.push([index + 1, student.registro || "", student.nome, ...values]);
     });
 
@@ -744,7 +913,7 @@
     return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
 <dimension ref="A1:${lastCell}"/>
-<sheetViews><sheetView workbookViewId="0"/></sheetViews>
+<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
 <sheetFormatPr defaultRowHeight="15"/>
 <cols><col min="1" max="1" width="6" customWidth="1"/><col min="2" max="2" width="15" customWidth="1"/><col min="3" max="3" width="42" customWidth="1"/>${activityCols}</cols>
 <sheetData>${xmlRows}</sheetData>
@@ -810,15 +979,15 @@
   }
 
   function buildGradesWorkbookBlob() {
-    const turmas = Object.keys(app.data || {}).filter(t => Object.keys(app.data[t] || {}).length);
-    if (!turmas.length) throw new Error("Não há notas para exportar.");
+    const turmaGroups = exportTurmaGroups();
+    if (!turmaGroups.length) throw new Error("Não há notas para exportar.");
 
     const usedNames = new Set();
-    const sheetDefs = turmas.map((turma, i) => ({
-      turma,
+    const sheetDefs = turmaGroups.map((group, i) => ({
+      turma: group.label,
       id: i + 1,
-      name: sanitizeSheetName(turma, usedNames),
-      rows: workbookRowsForTurma(turma)
+      name: sanitizeSheetName(group.label, usedNames),
+      rows: workbookRowsForTurma(group.label, group.sources)
     }));
 
     const workbookSheets = sheetDefs.map(s => `<sheet name="${xmlSafe(s.name)}" sheetId="${s.id}" r:id="rId${s.id}"/>`).join("");
@@ -854,7 +1023,7 @@ ${workbookRels}
 <fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
 <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
 <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs>
+<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"><alignment wrapText="1" vertical="center"/></xf></cellXfs>
 <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
 </styleSheet>` }
     ];
@@ -1423,8 +1592,8 @@ ${workbookRels}
     const valueIndex = lines.findIndex(line => norm(line).includes("VALOR DA ATIVIDADE"));
     if (valueIndex >= 0) {
       const valueLine = lines[valueIndex];
-      const m = valueLine.replace(/\./g, "").replace(",", ".").match(/VALOR\s+DA\s+ATIVIDADE\s*:?\s*(-?\d+(?:\.\d+)?)/i);
-      if (m) valor = Number(m[1]);
+      const m = valueLine.match(/VALOR\s+DA\s+ATIVIDADE\s*:?\s*(-?\d+(?:[.,]\d+)?)/i);
+      if (m) valor = parseFlexibleNumber(m[1]);
       for (let i = valueIndex - 1; i >= Math.max(0, valueIndex - 5); i--) {
         const candidate = lines[i].trim();
         const n = norm(candidate);
@@ -1527,13 +1696,380 @@ ${workbookRels}
 
   function parseDedGradeValue(raw) {
     const text = String(raw ?? "").trim();
-    if (!text || text === "-" || text === "—") return null;
-    const normalized = text.replace(/\s/g, "").replace(/\./g, "").replace(",", ".");
-    const m = normalized.match(/-?\d+(?:\.\d+)?/);
-    if (!m) return null;
-    const n = Number(m[0]);
-    return Number.isFinite(n) ? n : null;
+    if (!text || text === "-" || text === "—" || text === "–") return null;
+    return parseFlexibleNumber(text);
   }
+
+
+  // Na Visão Geral, só ignoramos colunas estruturais de identificação.
+  // Colunas de resumo (TOTAL, NOTA FINAL, MÉDIA, TOTAL DE FALTAS, FREQUÊNCIA,
+  // SITUAÇÃO etc.) também fazem parte da captura e vão para a planilha.
+  const DED_OVERVIEW_IGNORE_HEADERS = new Set([
+    "N", "NO", "NUM", "NUMERO", "NOME", "NOME DO ALUNO", "ALUNO", "ESTUDANTE",
+    "MATRICULA", "MATRÍCULA", "REGISTRO", "ID", "CODIGO", "CÓDIGO"
+  ].map(norm));
+
+  function parseFlexibleNumber(raw) {
+    const text = String(raw ?? "").replace(/\u00a0/g, " ").trim();
+    if (!text) return null;
+    const token = text.match(/-?\d+(?:[.,]\d+)?/)?.[0];
+    if (!token) return null;
+
+    let normalized = token;
+    const comma = normalized.lastIndexOf(",");
+    const dot = normalized.lastIndexOf(".");
+    if (comma >= 0 && dot >= 0) {
+      const decimalIsComma = comma > dot;
+      if (decimalIsComma) normalized = normalized.replace(/\./g, "").replace(",", ".");
+      else normalized = normalized.replace(/,/g, "");
+    } else if (comma >= 0) {
+      normalized = normalized.replace(",", ".");
+    }
+
+    const value = Number(normalized);
+    return Number.isFinite(value) ? value : null;
+  }
+
+  function parseDedOverviewGrade(raw) {
+    const text = String(raw ?? "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+    if (!text || ["-", "—", "–"].includes(text)) {
+      return { nota: null, naoRealizada: false, semNota: true };
+    }
+
+    const n = norm(text);
+    if (["NF", "N F", "NR", "N R", "NAO FEZ", "NAO REALIZADA", "NAO REALIZADO", "AUSENTE", "FALTOU", "FALTA"].includes(n)) {
+      return { nota: 0, naoRealizada: true, semNota: false };
+    }
+
+    // Notas e totais numéricos ficam como números. Aceita ponto ou vírgula decimal
+    // sem transformar, por exemplo, 5.0 em 50.
+    const onlyNumber = text.replace(/\s/g, "").match(/^-?\d+(?:[.,]\d+)?$/);
+    if (onlyNumber) {
+      const nota = parseFlexibleNumber(onlyNumber[0]);
+      return nota === null ? null : { nota, naoRealizada: false, semNota: false };
+    }
+
+    // Colunas-resumo também podem ter texto (ex.: APROVADO, EM RECUPERAÇÃO, 80%).
+    // Preservamos o valor exatamente como aparece para que nenhuma coluna visível seja descartada.
+    return { nota: text, naoRealizada: false, semNota: false, texto: true };
+  }
+
+  function looksLikeDedOverviewPage() {
+    const text = norm(document.body?.innerText || "");
+    return text.includes("VISAO GERAL DA TURMA") ||
+      (text.includes("RELATORIO GERAL") && text.includes("TOTAL DE ALUNOS")) ||
+      (/\/turma(?:[/?#]|$)/i.test(location.pathname || "") && text.includes("RELATORIO GERAL"));
+  }
+
+  function getDedOverviewDivision() {
+    const options = [...document.querySelectorAll("select option:checked, select option[selected]")]
+      .map(el => String(el.textContent || "").trim())
+      .filter(Boolean);
+    const selected = options.find(text => /\b(?:TRIMESTRE|BIMESTRE|SEMESTRE)\b/i.test(text));
+    if (selected) return selected;
+
+    const lines = pageLinesWithoutWidget();
+    return lines.find(line => /\b(?:1|2|3|4)\s*[º°o]?\s*(?:TRIMESTRE|BIMESTRE|SEMESTRE)\b/i.test(line)) || "";
+  }
+
+  function rowLikeElements(root) {
+    const rows = [...root.querySelectorAll("tr, mat-header-row, mat-row, [role='row']")];
+    return rows.filter(row => !row.closest?.("#dedNotasPanel"));
+  }
+
+  function expandedRowCells(row) {
+    const rawCells = [...row.children].filter(el => {
+      const tag = (el.tagName || "").toUpperCase();
+      const role = String(el.getAttribute?.("role") || "").toLowerCase();
+      return tag === "TD" || tag === "TH" || tag === "MAT-CELL" || tag === "MAT-HEADER-CELL" ||
+        role === "cell" || role === "gridcell" || role === "columnheader";
+    });
+
+    const cells = rawCells.length ? rawCells : [...row.children].filter(el => String(el.textContent || "").trim());
+    const out = [];
+    for (const cell of cells) {
+      const span = Math.max(1, Math.min(50, Number(cell.getAttribute?.("colspan") || 1) || 1));
+      for (let i = 0; i < span; i++) out.push({ cell, text: String(cell.innerText || cell.textContent || "").trim(), continuation: i > 0 });
+    }
+    return out;
+  }
+
+  function overviewIdentityFromRow(row) {
+    const raw = String(row.innerText || row.textContent || "");
+    const registro = raw.match(/\b\d{6,12}\b/)?.[0] || "";
+    if (!registro) return { nome: "", registro: "" };
+
+    const validName = text => {
+      const cleaned = String(text || "")
+        .replace(/\b(?:REMANEJADO|TRANSFERIDO|ATIVO|INATIVO)\b/ig, " ")
+        .replace(/\b\d{6,12}\b/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      const n = norm(cleaned);
+      if (!cleaned || cleaned.length < 5 || cleaned.length > 140) return "";
+      if (DED_OVERVIEW_IGNORE_HEADERS.has(n)) return "";
+      if (!/[A-Za-zÀ-ÿ]/.test(cleaned)) return "";
+      const words = cleaned.split(/\s+/).filter(w => /[A-Za-zÀ-ÿ]/.test(w));
+      if (words.length < 2) return "";
+      return cleaned;
+    };
+
+    const anchors = [...row.querySelectorAll("a, [role='link']")]
+      .map(el => validName(el.textContent))
+      .filter(Boolean)
+      .sort((a, b) => b.length - a.length);
+    if (anchors.length) return { nome: anchors[0], registro };
+
+    for (const cell of expandedRowCells(row)) {
+      const lines = String(cell.text || "").split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+      for (const line of lines) {
+        const candidate = validName(line);
+        if (candidate) return { nome: candidate, registro };
+      }
+    }
+    return { nome: "", registro };
+  }
+
+  function selectDedOverviewGrid() {
+    const roots = [...document.querySelectorAll("table, mat-table, [role='table'], [role='grid']")]
+      .filter(root => !root.closest?.("#dedNotasPanel"));
+
+    let best = null;
+    for (const root of roots) {
+      const rows = rowLikeElements(root);
+      let students = 0;
+      let numericCells = 0;
+      for (const row of rows) {
+        const identity = overviewIdentityFromRow(row);
+        if (!identity.nome || !identity.registro) continue;
+        students++;
+        numericCells += expandedRowCells(row).filter(item => { const parsed = parseDedOverviewGrade(item.text); return parsed && !parsed.semNota; }).length;
+      }
+      const score = students * 100 + numericCells;
+      if (students >= 1 && (!best || score > best.score)) best = { root, rows, students, score };
+    }
+    return best;
+  }
+
+  function cleanOverviewActivityTitle(text) {
+    let raw = String(text || "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+    if (!raw) return "";
+    raw = raw
+      .replace(/\s+[-–—]?\s*(?:\d+[.,]\d+|\d+\s*(?:PONTOS?|PTS?))\s*$/i, "")
+      .replace(/^VALOR\s*:?\s*/i, "")
+      .trim();
+    const n = norm(raw);
+    if (!n || DED_OVERVIEW_IGNORE_HEADERS.has(n)) return "";
+    if (n.includes("NOME DO ALUNO") || n === "ALUNO" || n === "ESTUDANTE") return "";
+    return raw;
+  }
+
+  function overviewHeaderForColumn(headerRows, colIndex) {
+    const pieces = [];
+    for (const row of headerRows) {
+      const cells = expandedRowCells(row);
+      const text = String(cells[colIndex]?.text || "").trim();
+      if (text && !pieces.includes(text)) pieces.push(text);
+    }
+
+    const joined = pieces.join(" ");
+    const numbers = [...joined.matchAll(/-?\d+(?:[.,]\d+)?/g)].map(m => parseFlexibleNumber(m[0])).filter(Number.isFinite);
+    const valor = numbers.length ? numbers[numbers.length - 1] : null;
+
+    let title = "";
+    for (const piece of pieces) {
+      const candidate = cleanOverviewActivityTitle(piece);
+      if (!candidate) continue;
+      // Uma linha que seja só a pontuação máxima não é título.
+      if (/^-?\d+(?:[.,]\d+)?\s*(?:PONTOS?|PTS?)?$/i.test(candidate)) continue;
+      title = candidate;
+      break;
+    }
+
+    return { title, valor, raw: joined };
+  }
+
+  function fallbackOverviewTitleFromCellHeader(root, cellIndex, studentCells) {
+    const sample = studentCells[cellIndex]?.cell;
+    if (!sample?.getBoundingClientRect) return { title: "", valor: null };
+    const sampleRect = sample.getBoundingClientRect();
+    const headerCandidates = [...root.querySelectorAll("th, mat-header-cell, [role='columnheader']")]
+      .filter(el => !el.closest?.("#dedNotasPanel"))
+      .map(el => ({ el, rect: el.getBoundingClientRect() }))
+      .filter(item => item.rect.width > 0)
+      .sort((a, b) => Math.abs((a.rect.left + a.rect.width / 2) - (sampleRect.left + sampleRect.width / 2)) -
+        Math.abs((b.rect.left + b.rect.width / 2) - (sampleRect.left + sampleRect.width / 2)));
+    const text = String(headerCandidates[0]?.el?.innerText || headerCandidates[0]?.el?.textContent || "").trim();
+    return { title: cleanOverviewActivityTitle(text), valor: parseFlexibleNumber(text) };
+  }
+
+  function readCurrentDedOverview() {
+    const grid = selectDedOverviewGrid();
+    if (!grid) throw new Error("Não encontrei a tabela de notas da Visão Geral da Turma.");
+
+    const rowInfos = grid.rows.map((row, index) => ({ row, index, identity: overviewIdentityFromRow(row), cells: expandedRowCells(row) }));
+    const rawStudents = rowInfos.filter(info => info.identity.nome && info.identity.registro);
+    const uniqueStudents = new Map();
+    for (const info of rawStudents) {
+      const key = info.identity.registro || canonicalName(info.identity.nome) || normName(info.identity.nome);
+      const prev = uniqueStudents.get(key);
+      const filled = info.cells.filter(cell => String(cell.text || "").trim() !== "").length;
+      const prevFilled = prev ? prev.cells.filter(cell => String(cell.text || "").trim() !== "").length : -1;
+      if (!prev || filled > prevFilled) uniqueStudents.set(key, info);
+    }
+    const students = [...uniqueStudents.values()];
+    if (!students.length) throw new Error("Achei a tabela, mas não consegui identificar os alunos e registros.");
+
+    const firstStudentIndex = Math.min(...students.map(s => s.index));
+    const headerRows = grid.rows.slice(0, firstStudentIndex);
+    const maxCols = Math.max(...students.map(s => s.cells.length));
+    const identityCols = new Set();
+    for (const student of students) {
+      student.cells.forEach((item, idx) => {
+        const t = norm(item.text);
+        if (t.includes(norm(student.identity.nome)) || t.includes(student.identity.registro)) identityCols.add(idx);
+      });
+    }
+
+    const activities = [];
+    const usedTitles = new Map();
+    const seenColumnSignatures = new Set();
+    for (let col = 0; col < maxCols; col++) {
+      if (identityCols.has(col)) continue;
+      const parsedByStudent = students.map(student => parseDedOverviewGrade(student.cells[col]?.text ?? ""));
+      const meaningful = parsedByStudent.filter(parsed => parsed && !parsed.semNota);
+      if (!meaningful.length) continue;
+
+      let header = overviewHeaderForColumn(headerRows, col);
+      if (!header.title) header = { ...header, ...fallbackOverviewTitleFromCellHeader(grid.root, col, students[0].cells) };
+      if (!header.title) continue;
+      const headerNorm = norm(header.title);
+      if (DED_OVERVIEW_IGNORE_HEADERS.has(headerNorm)) continue;
+
+      // O DED+ pode manter clones/sticky columns no DOM. Se cabeçalho + valores forem iguais,
+      // é a mesma coluna visual e não deve virar uma atividade duplicada no XLSX.
+      const valueSignature = parsedByStudent.map((parsed, idx) => {
+        const p = parsed || { nota: null, naoRealizada: false, semNota: true };
+        const value = p.naoRealizada ? "NF" : (p.semNota ? "" : String(p.nota ?? ""));
+        return `${students[idx].identity.registro}:${value}`;
+      }).join("|");
+      const duplicateSignature = `${headerNorm}||${valueSignature}`;
+      if (seenColumnSignatures.has(duplicateSignature)) continue;
+      seenColumnSignatures.add(duplicateSignature);
+
+      let title = header.title;
+      const seen = (usedTitles.get(headerNorm) || 0) + 1;
+      usedTitles.set(headerNorm, seen);
+      if (seen > 1) title = `${title} · ${seen}`;
+
+      const alunos = students.map((student, idx) => {
+        const parsed = parsedByStudent[idx] || { nota: null, naoRealizada: false, semNota: true };
+        return {
+          nome: student.identity.nome,
+          registro: student.identity.registro,
+          nota: parsed.nota,
+          naoRealizada: !!parsed.naoRealizada,
+          semNota: !!parsed.semNota,
+          origem: "DED+ Visão Geral"
+        };
+      });
+
+      activities.push({ title, valor: header.valor, alunos });
+    }
+
+    if (!activities.length) {
+      throw new Error("Encontrei os alunos, mas não consegui relacionar as colunas de notas aos nomes das atividades.");
+    }
+
+    const totalText = String(document.body?.innerText || "");
+    const expectedStudents = Number(totalText.match(/TOTAL\s+DE\s+ALUNOS\s*:?\s*(\d+)/i)?.[1] || 0) || null;
+
+    return {
+      turma: detectTurmaFromPage() || "Turma DED",
+      divisao: getDedOverviewDivision(),
+      alunosCount: students.length,
+      expectedStudents,
+      atividades: activities
+    };
+  }
+
+  function mergeCapturedRowsIntoActivity(turma, activityTitle, meta, rows) {
+    if (!app.data) app.data = {};
+    if (!app.data[turma]) app.data[turma] = {};
+
+    const current = app.data[turma][activityTitle] || { rotulo: activityTitle, alunos: [] };
+    const merged = new Map();
+    const order = [];
+    for (const row of current.alunos || []) {
+      const key = canonicalName(row.nome) || normName(row.nome);
+      if (!key || merged.has(key)) continue;
+      merged.set(key, { ...row });
+      order.push(key);
+    }
+    for (const row of rows || []) {
+      const key = canonicalName(row.nome) || normName(row.nome);
+      if (!key) continue;
+      if (!merged.has(key)) order.push(key);
+      merged.set(key, { ...(merged.get(key) || {}), ...row });
+    }
+
+    app.data[turma][activityTitle] = {
+      ...current,
+      ...meta,
+      rotulo: activityTitle,
+      origem: meta?.origem || "DED+",
+      alunos: order.map(key => merged.get(key))
+    };
+  }
+
+  function mergeCapturedDedOverview(capture) {
+    for (const activity of capture.atividades) {
+      mergeCapturedRowsIntoActivity(capture.turma, activity.title, {
+        valor: activity.valor,
+        divisao: capture.divisao,
+        origem: "DED+ Visão Geral"
+      }, activity.alunos);
+    }
+    if (!app.fileName) app.fileName = "DED_notas_capturadas.xlsx";
+    saveData();
+    refreshPanelData();
+
+    const turmaSelect = document.getElementById("dedNotasTurma");
+    if (turmaSelect && [...turmaSelect.options].some(o => o.value === capture.turma)) {
+      turmaSelect.value = capture.turma;
+      refreshActivities();
+    }
+  }
+
+  function captureCurrentDedPageToSheet() {
+    try {
+      if (looksLikeDedOverviewPage()) {
+        const capture = readCurrentDedOverview();
+        mergeCapturedDedOverview(capture);
+        const gradeCells = capture.atividades.reduce((sum, activity) => sum + activity.alunos.filter(a => !a.semNota && !a.naoRealizada).length, 0);
+        const nf = capture.atividades.reduce((sum, activity) => sum + activity.alunos.filter(a => a.naoRealizada).length, 0);
+        const blanks = capture.atividades.reduce((sum, activity) => sum + activity.alunos.filter(a => a.semNota).length, 0);
+        const divisao = capture.divisao ? ` · ${esc(capture.divisao)}` : "";
+        const incomplete = capture.expectedStudents && capture.alunosCount < capture.expectedStudents
+          ? `<br>⚠️ A página informa <b>${capture.expectedStudents}</b> alunos, mas ${capture.alunosCount} estão carregados no DOM agora. Se a tabela carregar alunos conforme a rolagem, role a lista e clique novamente; o widget acumula/atualiza os alunos sem apagar os já capturados.`
+          : "";
+        logMessage(`✅ <b>Visão Geral da Turma</b> (${esc(capture.turma)}) lida${divisao}.<br><b>${capture.alunosCount}</b> aluno(s) e <b>${capture.atividades.length}</b> atividade(s) capturadas de uma vez.<br>${gradeCells} valor(es) preenchido(s), ${nf} NF/ausência(s), ${blanks} célula(s) vazia(s).${incomplete}<br>Clique em <b>Baixar planilha atualizada</b> para salvar o .xlsx.`);
+        return;
+      }
+
+      const capture = readCurrentDedActivity();
+      mergeCapturedDedActivity(capture);
+      const grades = capture.alunos.filter(a => !a.semNota && !a.naoRealizada).length;
+      const nf = capture.alunos.filter(a => a.naoRealizada).length;
+      const blanks = capture.alunos.filter(a => a.semNota).length;
+      const valor = Number.isFinite(capture.meta.valor) ? ` · valor ${capture.meta.valor}` : "";
+      logMessage(`✅ <b>${esc(capture.atividade)}</b> (${esc(capture.turma)}) lida do DED+${valor}.<br><b>${capture.alunos.length}</b> aluno(s): ${grades} nota(s), ${nf} não realizada(s), ${blanks} sem nota.<br>A atividade foi guardada na planilha do widget. Clique em <b>Baixar planilha atualizada</b> para salvar o .xlsx.`);
+    } catch (err) {
+      console.error(err);
+      logMessage(`❌ ${esc(err.message || err)}`);
+    }
+  }
+
 
   function readCurrentDedActivity() {
     const turma = detectTurmaFromPage() || "Turma DED";
@@ -1620,20 +2156,6 @@ ${workbookRels}
     }
   }
 
-  function captureDedActivityToSheet() {
-    try {
-      const capture = readCurrentDedActivity();
-      mergeCapturedDedActivity(capture);
-      const grades = capture.alunos.filter(a => !a.semNota && !a.naoRealizada).length;
-      const nf = capture.alunos.filter(a => a.naoRealizada).length;
-      const blanks = capture.alunos.filter(a => a.semNota).length;
-      const valor = Number.isFinite(capture.meta.valor) ? ` · valor ${capture.meta.valor}` : "";
-      logMessage(`✅ <b>${esc(capture.atividade)}</b> (${esc(capture.turma)}) lida do DED+${valor}.<br><b>${capture.alunos.length}</b> aluno(s): ${grades} nota(s), ${nf} não realizada(s), ${blanks} sem nota.<br>A atividade foi guardada na planilha do widget. Clique em <b>Baixar planilha atualizada</b> para salvar o .xlsx.`);
-    } catch (err) {
-      console.error(err);
-      logMessage(`❌ ${esc(err.message || err)}`);
-    }
-  }
 
   function getSelectedOptions() {
     const turma = document.getElementById("dedNotasTurma")?.value || detectTurmaFromPage();
@@ -2226,7 +2748,7 @@ ${workbookRels}
       <div id="dedNotasDrag" style="cursor:move; background:linear-gradient(135deg,#70417b,#8d5a97); color:#fff; padding:13px 15px; display:flex; align-items:center; justify-content:space-between; gap:10px;">
         <div>
           <div style="font-weight:900; font-size:16px; letter-spacing:.2px;">DED+ Notas + Chamadas</div>
-          <div style="font-size:11px; opacity:.86;">XLSX/CSV ↔ DED+ · notas · faltas · captura de atividades</div>
+          <div style="font-size:11px; opacity:.86;">XLSX/CSV ↔ DED+ · notas · faltas · captura de atividades e visão geral</div>
         </div>
         <div style="display:flex; gap:6px;">
           <button id="dedNotasMin" title="Minimizar" style="border:0; background:rgba(255,255,255,.18); color:#fff; border-radius:10px; padding:5px 9px; cursor:pointer; font-weight:900;">–</button>
@@ -2266,9 +2788,9 @@ ${workbookRels}
 
           <div style="border-top:1px solid #ead8ef; margin-top:12px; padding-top:12px;">
             <div style="font-size:12px; font-weight:900; color:#5b2b66; margin-bottom:4px;">DED+ → planilha</div>
-            <div style="font-size:11px; color:#6a5970; margin-bottom:9px;">Na tela de uma atividade, lê automaticamente <b>nome do aluno + registro + Nota</b> e guarda como uma coluna da turma. “Não realizada” vira <b>NF</b>.</div>
+            <div style="font-size:11px; color:#6a5970; margin-bottom:9px;">Lê tanto a tela de <b>uma atividade</b> quanto a <b>Visão Geral da Turma</b>. Na visão geral, captura todos os alunos e todas as colunas de atividades de uma vez, com nome + registro + nota.</div>
             <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
-              <button id="dedNotasReadDed" style="background:#4d7fa8; color:#fff; border:0; border-radius:12px; padding:10px; font-weight:900; cursor:pointer;">Ler atividade do DED</button>
+              <button id="dedNotasReadDed" style="background:#4d7fa8; color:#fff; border:0; border-radius:12px; padding:10px; font-weight:900; cursor:pointer;">Ler notas desta página</button>
               <button id="dedNotasExportCurrent" style="background:#70417b; color:#fff; border:0; border-radius:12px; padding:10px; font-weight:900; cursor:pointer;">Baixar planilha atualizada</button>
             </div>
           </div>
@@ -2387,7 +2909,7 @@ ${workbookRels}
       if (!app.data) return logMessage("Carrega a planilha de notas primeiro, mona.");
       renderLog(fillOnce(getSelectedOptions(), false));
     });
-    panel.querySelector("#dedNotasReadDed").addEventListener("click", captureDedActivityToSheet);
+    panel.querySelector("#dedNotasReadDed").addEventListener("click", captureCurrentDedPageToSheet);
     panel.querySelector("#dedNotasExportCurrent").addEventListener("click", exportGradesWorkbook);
 
     panel.querySelector("#dedCallCheck").addEventListener("click", () => {

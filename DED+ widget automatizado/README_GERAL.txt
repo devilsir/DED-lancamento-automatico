@@ -1,11 +1,17 @@
-DED+ Notas + Chamadas Widget — v1.1.0
+DED+ Notas + Chamadas Widget — v1.2.2
 
 O que tem:
 - Lê planilhas de notas .xlsx/.csv e preenche notas no DED+.
-- NOVO: lê a atividade que está aberta no DED+ e guarda NOME DO ALUNO + REGISTRO + NOTA na planilha do widget.
-- NOVO: junta várias atividades da mesma turma em colunas e exporta tudo em um novo .xlsx.
-- NOVO: se a atividade já existir na planilha carregada, a captura do DED+ atualiza os alunos encontrados nessa atividade.
-- “Não realizada” é guardado como NF; campo sem nota continua vazio.
+- Lê uma atividade aberta em “Avaliações - Lançar Notas” e guarda NOME DO ALUNO + REGISTRO + NOTA.
+- NOVO v1.2.2: na página “Visão Geral da Turma / Relatório Geral”, captura todos os alunos e TODAS as colunas visíveis, inclusive colunas de resumo como TOTAL DE NOTAS, NOTA FINAL, MÉDIA, TOTAL DE FALTAS, FREQUÊNCIA e SITUAÇÃO.
+- CORREÇÃO v1.2.2: evita alunos/colunas duplicados quando o DED+ mantém cópias sticky/virtuais da tabela no DOM; a exportação também limpa duplicatas legadas compatíveis (ex.: “Lista 1” e “Lista 1 · 2”) sem apagar atividades realmente diferentes.
+- CORREÇÃO v1.2.2: turmas equivalentes no formato do DED+ (ex.: “6º EF AF REG 2 (2026)” e “6º2”) são consolidadas em uma única aba no XLSX.
+- CORREÇÃO v1.2.2: cabeçalho do XLSX fica congelado na primeira linha e com quebra de texto para melhorar a leitura de colunas longas.
+- Na Visão Geral, usa os títulos das colunas como nomes das atividades e também guarda a pontuação máxima quando ela aparece no cabeçalho.
+- Aceita notas com ponto ou vírgula (ex.: 8.5, 8,5, 1,50) sem transformar 5.0 em 50.
+- Junta várias atividades da mesma turma em colunas e exporta tudo em um novo .xlsx.
+- Se uma atividade já existir na planilha carregada, a captura do DED+ atualiza os alunos encontrados nessa atividade.
+- “Não realizada”/NF é guardado como NF; célula sem nota continua vazia.
 - Lê planilha de chamada com P/F e lança falta para quem está como F.
 - Na tela de chamada do DED+, quando a falta é lançada clicando no ícone verde de presença, o widget reconhece esse ícone e clica nele.
 - Exporta modelo de notas em branco.
@@ -13,30 +19,34 @@ O que tem:
 - Mantém exceções de nomes parecidos: Lavynna/Lavyna, Luis/Luiz, Sousa/Souza, Isabela/Isabella etc.
 - Não clica em Salvar automaticamente no DED+.
 
-DED+ → PLANILHA (NOVO):
-1. Abra no DED+ a tela “Avaliações - Lançar Notas” da atividade que você quer copiar.
-2. No widget, clique em “Ler atividade do DED”.
-3. O widget detecta a turma e o título da atividade e lê os cartões dos alunos.
-4. Para cada aluno ele guarda:
-   - nome;
-   - registro/matrícula quando estiver visível;
-   - nota da atividade;
-   - NF quando “Não realizada” estiver marcado.
-5. Abra outras atividades e repita “Ler atividade do DED”. Elas viram novas colunas da mesma turma.
-6. Clique em “Baixar planilha atualizada” para gerar o .xlsx com abas por turma.
+DED+ → PLANILHA:
+
+Opção A — atividade individual:
+1. Abra no DED+ a tela “Avaliações - Lançar Notas” da atividade.
+2. No widget, clique em “Ler notas desta página”.
+3. O widget detecta turma, atividade, aluno, registro e nota.
+4. “Não realizada” vira NF e campo sem nota fica vazio.
+
+Opção B — Visão Geral da Turma:
+1. Abra a página da turma onde aparece “Visão Geral da Turma” e o quadro “Relatório Geral”.
+2. Selecione o trimestre desejado no DED+.
+3. Clique em “Ler notas desta página”.
+4. O widget lê a tabela inteira: nomes, registros, atividades e colunas de resumo disponíveis.
+5. Cada coluna de dados do DED+ vira uma coluna na planilha da turma, inclusive TOTAL DE NOTAS e TOTAL DE FALTAS.
+6. Clique em “Baixar planilha atualizada” para gerar o .xlsx.
 
 IMPORTANTE SOBRE A CAPTURA:
-- O widget lê os alunos que estão presentes no DOM da página do DED+.
-- Ele não altera nenhuma nota ao usar “Ler atividade do DED”; apenas copia os dados para o armazenamento local do widget.
-- Se você já carregou uma planilha de notas, a captura é incorporada aos dados dela no widget e o download sai como uma versão atualizada.
-- O navegador não sobrescreve o arquivo original no seu computador: ele baixa um novo .xlsx.
+- A leitura é feita diretamente no DOM da página aberta e não envia os dados para servidor externo.
+- O botão de leitura não altera notas no DED+; apenas copia os dados para o armazenamento local do widget.
+- Se você já carregou uma planilha de notas, a captura é incorporada aos dados dela no widget.
+- O navegador não sobrescreve o arquivo original: ele baixa um novo .xlsx.
+- Na Visão Geral, colunas de resumo NÃO são ignoradas: TOTAL, TOTAL DE NOTAS, NOTA FINAL, MÉDIA, TOTAL DE FALTAS, FREQUÊNCIA, SITUAÇÃO e outras colunas visíveis também são capturadas.
 
 Formato de notas:
 - Aba por turma: 6º1, 6º2, 7º1...
-- Linha com NOME DO ALUNO.
-- REGISTRO/MATRÍCULA é aceito e ignorado como coluna de atividade.
-- Colunas de atividades depois do nome: JEMG, PROJETO, TRABALHO, PROVA etc.
-- TOTAL, NOTA FINAL e OBSERVAÇÕES são ignoradas.
+- NOME DO ALUNO e REGISTRO/MATRÍCULA.
+- Colunas de atividades: JEMG, PARTICIPAÇÃO, LISTA 1, PROVA, PROJETO etc.
+- Ao IMPORTAR uma planilha para lançar notas no DED+, TOTAL, NOTA FINAL e OBSERVAÇÕES continuam sendo tratados como colunas auxiliares e não como atividades. Isso não afeta a captura da Visão Geral: nela, os resumos são exportados.
 
 Formato de chamada:
 - Aba por turma: 6º1, 6º2, 7º1...

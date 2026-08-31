@@ -1,8 +1,11 @@
-DED+ Notas + Chamadas Widget — v1.1.0
+DED+ Notas + Chamadas Widget — v1.2.2
 
 O que tem:
 - Lê planilhas de notas .xlsx/.csv e preenche notas no DED+.
-- NOVO: lê a atividade que está aberta no DED+ e guarda NOME DO ALUNO + REGISTRO + NOTA na planilha do widget.
+- Lê a atividade que está aberta no DED+ e guarda NOME DO ALUNO + REGISTRO + NOTA na planilha do widget.
+- Lê também a Visão Geral da Turma e captura atividades + colunas de resumo, inclusive TOTAL DE NOTAS e TOTAL DE FALTAS.
+- v1.2.2: corrige duplicações na turma do 6º ano causadas por colunas/linhas sticky ou virtuais do DED+ e limpa duplicatas compatíveis na exportação.
+- v1.2.2: consolida nomes equivalentes da mesma turma (ex.: “6º EF AF REG 2 (2026)” e “6º2”) em uma única aba.
 - NOVO: junta várias atividades da mesma turma em colunas e exporta tudo em um novo .xlsx.
 - NOVO: se a atividade já existir na planilha carregada, a captura do DED+ atualiza os alunos encontrados nessa atividade.
 - “Não realizada” é guardado como NF; campo sem nota continua vazio.
@@ -25,6 +28,13 @@ DED+ → PLANILHA (NOVO):
 5. Abra outras atividades e repita “Ler atividade do DED”. Elas viram novas colunas da mesma turma.
 6. Clique em “Baixar planilha atualizada” para gerar o .xlsx com abas por turma.
 
+VISÃO GERAL DA TURMA → PLANILHA:
+1. Abra a página “Visão Geral da Turma / Relatório Geral”.
+2. Selecione o trimestre desejado.
+3. Clique em “Ler notas desta página”.
+4. O widget captura nome, registro e todas as colunas de dados visíveis.
+5. Colunas de resumo NÃO são ignoradas: TOTAL DE NOTAS, NOTA FINAL, MÉDIA, TOTAL DE FALTAS, FREQUÊNCIA, SITUAÇÃO etc. também vão para o XLSX.
+
 IMPORTANTE SOBRE A CAPTURA:
 - O widget lê os alunos que estão presentes no DOM da página do DED+.
 - Ele não altera nenhuma nota ao usar “Ler atividade do DED”; apenas copia os dados para o armazenamento local do widget.
@@ -36,7 +46,7 @@ Formato de notas:
 - Linha com NOME DO ALUNO.
 - REGISTRO/MATRÍCULA é aceito e ignorado como coluna de atividade.
 - Colunas de atividades depois do nome: JEMG, PROJETO, TRABALHO, PROVA etc.
-- TOTAL, NOTA FINAL e OBSERVAÇÕES são ignoradas.
+- Ao IMPORTAR uma planilha para lançar notas, TOTAL, NOTA FINAL e OBSERVAÇÕES seguem como colunas auxiliares; na captura da Visão Geral, porém, os resumos são preservados e exportados.
 
 Formato de chamada:
 - Aba por turma: 6º1, 6º2, 7º1...
