@@ -1,6 +1,7 @@
-DED+ Notas + Chamadas Widget — v1.2.2
+DED+ Notas + Chamadas Widget — v1.3
 
 O que tem:
+- v1.3: atualização da relação de alunos, incluindo remanejados e retirando inativos no XLSX exportado, sem apagar notas anteriores.
 - Lê planilhas de notas .xlsx/.csv e preenche notas no DED+.
 - Lê a atividade que está aberta no DED+ e guarda NOME DO ALUNO + REGISTRO + NOTA na planilha do widget.
 - Lê também a Visão Geral da Turma e captura atividades + colunas de resumo, inclusive TOTAL DE NOTAS e TOTAL DE FALTAS.
@@ -18,7 +19,7 @@ O que tem:
 
 DED+ → PLANILHA (NOVO):
 1. Abra no DED+ a tela “Avaliações - Lançar Notas” da atividade que você quer copiar.
-2. No widget, clique em “Ler atividade do DED”.
+2. No widget, clique em “Ler notas desta página”.
 3. O widget detecta a turma e o título da atividade e lê os cartões dos alunos.
 4. Para cada aluno ele guarda:
    - nome;
@@ -27,6 +28,14 @@ DED+ → PLANILHA (NOVO):
    - NF quando “Não realizada” estiver marcado.
 5. Abra outras atividades e repita “Ler atividade do DED”. Elas viram novas colunas da mesma turma.
 6. Clique em “Baixar planilha atualizada” para gerar o .xlsx com abas por turma.
+
+ATUALIZAR A RELAÇÃO DE ALUNOS:
+1. Abra a “Visão Geral da Turma” e, no widget, localize “Atualizar relação de alunos”.
+2. Marque “Incluir remanejados” e “Retirar inativos da planilha” conforme sua necessidade.
+3. Use “Ler alunos desta turma”, confira a prévia e clique em “Aplicar atualização”.
+4. Role a lista no DED+ e repita a leitura caso haja alunos carregados por partes.
+5. Clique em “Baixar planilha atualizada” para gerar o novo XLSX. O original não será sobrescrito.
+6. “Reiniciar leitura desta turma” apaga só a lista de conferência, preservando notas e chamadas.
 
 VISÃO GERAL DA TURMA → PLANILHA:
 1. Abra a página “Visão Geral da Turma / Relatório Geral”.

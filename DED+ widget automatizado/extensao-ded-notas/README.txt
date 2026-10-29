@@ -1,6 +1,8 @@
-DED+ Notas + Chamadas Widget — v1.2.2
+DED+ Notas + Chamadas Widget — v1.3
 
 O que tem:
+- NOVO v1.3: lê a relação de alunos e a situação de matrícula direto da Visão Geral da Turma. Inclui remanejados e retira inativos da planilha exportada, com prévia e confirmação, sem apagar as notas salvas no widget.
+- NOVO v1.3: permite acumular leituras quando o DED+ mostra apenas parte da lista durante a rolagem. Também é possível reiniciar a leitura de uma turma sem apagar notas nem chamadas.
 - Lê planilhas de notas .xlsx/.csv e preenche notas no DED+.
 - Lê uma atividade aberta em “Avaliações - Lançar Notas” e guarda NOME DO ALUNO + REGISTRO + NOTA.
 - NOVO v1.2.2: na página “Visão Geral da Turma / Relatório Geral”, captura todos os alunos e TODAS as colunas visíveis, inclusive colunas de resumo como TOTAL DE NOTAS, NOTA FINAL, MÉDIA, TOTAL DE FALTAS, FREQUÊNCIA e SITUAÇÃO.
@@ -34,6 +36,17 @@ Opção B — Visão Geral da Turma:
 4. O widget lê a tabela inteira: nomes, registros, atividades e colunas de resumo disponíveis.
 5. Cada coluna de dados do DED+ vira uma coluna na planilha da turma, inclusive TOTAL DE NOTAS e TOTAL DE FALTAS.
 6. Clique em “Baixar planilha atualizada” para gerar o .xlsx.
+
+Opção C — atualizar alunos da planilha:
+1. Abra “Visão Geral da Turma” no DED+ e deixe a tabela de alunos carregada.
+2. Na seção “Atualizar relação de alunos”, deixe ativadas as opções “Incluir remanejados” e “Retirar inativos da planilha”, ou ajuste-as como desejar.
+3. Clique em “Ler alunos desta turma” e confira a prévia de inclusões e retiradas.
+4. Se o DED+ mostrar a lista por partes, role a tabela e repita a leitura. As leituras são acumuladas, sem remover quem ainda não apareceu na tela.
+5. Clique em “Aplicar atualização” e, depois, “Baixar planilha atualizada”.
+6. Se precisar recomeçar uma conferência, use “Reiniciar leitura desta turma”. As notas e chamadas continuarão guardadas.
+- Os remanejados ganham uma linha vazia nas atividades onde ainda não têm nota. Os alunos marcados como inativos ficam fora do novo XLSX.
+- O XLSX inclui a coluna “SITUAÇÃO DA MATRÍCULA”, separada de qualquer coluna de situação acadêmica que já existia.
+- O arquivo original não é sobrescrito e notas antigas não são apagadas do widget.
 
 IMPORTANTE SOBRE A CAPTURA:
 - A leitura é feita diretamente no DOM da página aberta e não envia os dados para servidor externo.

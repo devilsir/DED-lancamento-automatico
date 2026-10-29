@@ -33,6 +33,8 @@
     fileName: "",
     callData: null,
     callFileName: "",
+    studentRosters: {},
+    rosterSettings: {},
     highlightColor: "#87B957",
     dangerColor: "#FF3860",
     warningColor: "#FFB020"
@@ -41,6 +43,7 @@
   const IGNORE_HEADERS = new Set([
     "N", "NO", "NUM", "NUMERO", "NOME", "NOME DO ALUNO", "ALUNO", "ESTUDANTE",
     "TOTAL", "NOTA FINAL", "MEDIA", "MÉDIA", "%", "SITUACAO", "SITUAÇÃO",
+    "SITUACAO DA MATRICULA", "SITUAÇÃO DA MATRÍCULA",
     "OBS", "OBSERVACAO", "OBSERVAÇÃO", "OBSERVACOES", "OBSERVAÇÕES",
     "MATRICULA", "MATRÍCULA", "REGISTRO", "ID", "CODIGO", "CÓDIGO",
     "MES", "MÊS", "ANO", "PROFESSOR", "PROFESSORA", "TURMA", "APROVACAO", "APROVAÇÃO"
@@ -716,6 +719,43 @@
     return { registro, nome };
   }
 
+  function rosterKey(turma) {
+    return normalizeTurma(turma);
+  }
+
+  function rosterStudentsForTurma(turma) {
+    return app.studentRosters?.[rosterKey(turma)]?.students || [];
+  }
+
+  function rosterOptionsForTurma(turma) {
+    return { includeRemanejados: true, removeInativos: true, ...(app.rosterSettings?.[rosterKey(turma)] || {}) };
+  }
+
+  function rosterStudentIndex(students) {
+    const byRegistro = new Map();
+    const byNome = new Map();
+    for (const student of students) {
+      const id = exportRowIdentity(student);
+      if (id.registro) byRegistro.set(id.registro, student);
+      if (id.nome && !byNome.has(id.nome)) byNome.set(id.nome, student);
+    }
+    return { byRegistro, byNome };
+  }
+
+  function matchingRosterStudent(row, index) {
+    const id = exportRowIdentity(row);
+    const byRegistro = id.registro && index.byRegistro.get(id.registro);
+    if (byRegistro) return byRegistro;
+    const byNome = id.nome && index.byNome.get(id.nome);
+    if (byNome && (!id.registro || !byNome.registro || String(byNome.registro) === id.registro)) return byNome;
+    return null;
+  }
+
+  function shouldExportRosterStudent(student, options) {
+    return !(student.status === "inativo" && options.removeInativos) &&
+      !(student.status === "remanejado" && !options.includeRemanejados);
+  }
+
   function rowsByNameForExport(rows) {
     const map = new Map();
     for (const row of rows || []) {
@@ -848,11 +888,21 @@
       if (!groups.has(key)) groups.set(key, { label: isSchoolTurma ? normalized : rawTurma, sources: [] });
       groups.get(key).sources.push(rawTurma);
     }
+    // A lista pode ter sido lida antes de qualquer atividade: exporta também um
+    // XLSX só com os alunos, para servir de base a novas notas.
+    for (const [turma, roster] of Object.entries(app.studentRosters || {})) {
+      if (!roster?.students?.length) continue;
+      const key = /^[6-9]º[12]$/.test(turma) ? turma : (norm(turma) || turma);
+      if (!groups.has(key)) groups.set(key, { label: turma, sources: [] });
+    }
     return [...groups.values()];
   }
 
   function workbookRowsForTurma(turma, sourceTurmas = [turma]) {
     const activities = exportActivitiesForTurmas(sourceTurmas);
+    const roster = rosterStudentsForTurma(turma);
+    const rosterIndex = rosterStudentIndex(roster);
+    const rosterOptions = rosterOptionsForTurma(turma);
     const studentMap = new Map();
     const byRegistro = new Map();
     const byNome = new Map();
@@ -861,7 +911,14 @@
     const ensureStudent = row => {
       const id = exportRowIdentity(row);
       if (!id.nome && !id.registro) return null;
-      let key = (id.registro && byRegistro.get(id.registro)) || (id.nome && byNome.get(id.nome));
+      let key = id.registro && byRegistro.get(id.registro);
+      if (!key && id.nome) {
+        const namedKey = byNome.get(id.nome);
+        const named = studentMap.get(namedKey);
+        if (named && (!id.registro || !named.registro || String(named.registro).replace(/\D/g, "") === id.registro)) {
+          key = namedKey;
+        }
+      }
       if (!key) {
         key = id.registro ? `R:${id.registro}` : `N:${id.nome}`;
         studentMap.set(key, { nome: row.nome || "", registro: row.registro || "", grades: {} });
@@ -871,7 +928,7 @@
       if ((!student.nome || student.nome.length < String(row.nome || "").length) && row.nome) student.nome = row.nome;
       if (!student.registro && row.registro) student.registro = row.registro;
       if (id.registro) byRegistro.set(id.registro, key);
-      if (id.nome) byNome.set(id.nome, key);
+      if (id.nome && !byNome.has(id.nome)) byNome.set(id.nome, key);
       return student;
     };
 
@@ -886,11 +943,25 @@
       }
     }
 
-    const rows = [["N", "REGISTRO", "NOME DO ALUNO", ...activities.map(a => a.title)]];
-    order.forEach((key, index) => {
+    for (const row of roster) {
+      if (shouldExportRosterStudent(row, rosterOptions)) ensureStudent(row);
+    }
+
+    const rows = [["N", "REGISTRO", "NOME DO ALUNO", ...activities.map(a => a.title), ...(roster.length ? ["SITUAÇÃO DA MATRÍCULA"] : [])]];
+    let rowNumber = 0;
+    order.forEach(key => {
       const student = studentMap.get(key);
+      const entry = matchingRosterStudent(student, rosterIndex);
+      if (entry && !shouldExportRosterStudent(entry, rosterOptions)) return;
+      // O nome e o registro atuais do DED prevalecem; as notas antigas ficam ligadas ao aluno.
+      if (entry) {
+        student.nome = entry.nome;
+        student.registro = entry.registro || student.registro;
+      }
       const values = activities.map(activity => exportGradeValue(student.grades[activity.title]));
-      rows.push([index + 1, student.registro || "", student.nome, ...values]);
+      rowNumber++;
+      const status = entry ? (entry.status === "remanejado" ? "Remanejado" : entry.status === "inativo" ? "Inativo" : "Ativo") : "Não conferido";
+      rows.push([rowNumber, student.registro || "", student.nome, ...values, ...(roster.length ? [status] : [])]);
     });
 
     return rows;
@@ -980,7 +1051,7 @@
 
   function buildGradesWorkbookBlob() {
     const turmaGroups = exportTurmaGroups();
-    if (!turmaGroups.length) throw new Error("Não há notas para exportar.");
+    if (!turmaGroups.length) throw new Error("Não há notas nem lista de alunos para exportar.");
 
     const usedNames = new Set();
     const sheetDefs = turmaGroups.map((group, i) => ({
@@ -1548,7 +1619,7 @@ ${workbookRels}
   }
 
   function detectTurmaFromPage() {
-    const body = document.body.innerText || "";
+    const body = pageLinesWithoutWidget().join("\n");
     const patterns = [
       /(6|7|8|9)\s*[º°o]?\s*EF\s*AF\s*REG\s*([12])\b/i,
       /(6|7|8|9)\s*[º°o]?\s*\.?\s*([12])\b/i,
@@ -1755,7 +1826,7 @@ ${workbookRels}
   }
 
   function looksLikeDedOverviewPage() {
-    const text = norm(document.body?.innerText || "");
+    const text = norm(pageLinesWithoutWidget().join(" "));
     return text.includes("VISAO GERAL DA TURMA") ||
       (text.includes("RELATORIO GERAL") && text.includes("TOTAL DE ALUNOS")) ||
       (/\/turma(?:[/?#]|$)/i.test(location.pathname || "") && text.includes("RELATORIO GERAL"));
@@ -1801,7 +1872,7 @@ ${workbookRels}
 
     const validName = text => {
       const cleaned = String(text || "")
-        .replace(/\b(?:REMANEJADO|TRANSFERIDO|ATIVO|INATIVO)\b/ig, " ")
+        .replace(/\b(?:REMANEJAD[OA]S?|TRANSFERID[OA]S?|INATIV[OA]S?|ATIV[OA]S?)\b/ig, " ")
         .replace(/\b\d{6,12}\b/g, " ")
         .replace(/\s+/g, " ")
         .trim();
@@ -1849,6 +1920,167 @@ ${workbookRels}
       if (students >= 1 && (!best || score > best.score)) best = { root, rows, students, score };
     }
     return best;
+  }
+
+  function rosterStatusFromRow(row) {
+    const text = norm(row.innerText || row.textContent || "");
+    if (/\bINATIV[OA]S?\b/.test(text)) return "inativo";
+    if (/\bREMANEJAD[OA]S?\b/.test(text)) return "remanejado";
+    return "ativo";
+  }
+
+  function readCurrentDedRoster() {
+    if (!looksLikeDedOverviewPage()) {
+      throw new Error("Abra a Visão Geral da Turma no DED+ para ler a relação de alunos.");
+    }
+    const grid = selectDedOverviewGrid();
+    if (!grid) throw new Error("Não localizei a tabela de alunos. Aguarde o carregamento da turma.");
+
+    const unique = new Map();
+    for (const row of grid.rows) {
+      const identity = overviewIdentityFromRow(row);
+      if (!identity.nome || !identity.registro) continue;
+      const student = { ...identity, status: rosterStatusFromRow(row) };
+      // Alguns grids duplicam a linha fixa; preserva a que possui um marcador de situação.
+      const previous = unique.get(identity.registro);
+      if (!previous || (previous.status === "ativo" && student.status !== "ativo")) {
+        unique.set(identity.registro, student);
+      }
+    }
+    if (!unique.size) throw new Error("Não consegui identificar nomes e registros na tabela do DED+.");
+
+    const turma = detectTurmaFromPage();
+    if (!/^[6-9]º[12]$/.test(rosterKey(turma))) {
+      throw new Error("Não consegui identificar a turma no cabeçalho do DED+. Não apliquei mudanças.");
+    }
+    const text = pageLinesWithoutWidget().join("\n");
+    const expectedStudents = Number(text.match(/TOTAL\s+DE\s+ALUNOS\s*:?\s*(\d+)/i)?.[1] || 0) || null;
+    return { turma: rosterKey(turma), students: [...unique.values()], expectedStudents };
+  }
+
+  function mergeRosterStudents(previous, incoming) {
+    const students = new Map();
+    for (const row of [...(previous || []), ...(incoming || [])]) {
+      const id = exportRowIdentity(row);
+      if (!id.registro) continue;
+      students.set(id.registro, { nome: row.nome, registro: id.registro, status: row.status || "ativo" });
+    }
+    return [...students.values()].sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
+  }
+
+  function existingGradeStudents(turma) {
+    const byRegistro = new Map();
+    const byNome = new Map();
+    for (const [sourceTurma, activities] of Object.entries(app.data || {})) {
+      if (rosterKey(sourceTurma) !== rosterKey(turma)) continue;
+      for (const activity of Object.values(activities || {})) {
+        for (const row of activity.alunos || []) {
+          const id = exportRowIdentity(row);
+          if (id.registro && !byRegistro.has(id.registro)) byRegistro.set(id.registro, row);
+          if (id.nome && !byNome.has(id.nome)) byNome.set(id.nome, row);
+        }
+      }
+    }
+    return { byRegistro, byNome };
+  }
+
+  let pendingRosterUpdate = null;
+
+  function rosterListHtml(label, items, color) {
+    if (!items.length) return "";
+    return `<details style="margin-top:7px;">
+      <summary style="cursor:pointer;color:${color};font-weight:800;">${esc(label)}: ${items.length}</summary>
+      <div style="max-height:130px;overflow:auto;padding:6px 0 0 12px;line-height:1.6;">${items.map(s => esc(s.nome)).join("<br>")}</div>
+    </details>`;
+  }
+
+  function readStudentsForSheet() {
+    try {
+      const capture = readCurrentDedRoster();
+      const settings = {
+        includeRemanejados: !!document.getElementById("dedRosterIncludeMoved")?.checked,
+        removeInativos: !!document.getElementById("dedRosterRemoveInactive")?.checked
+      };
+      const students = mergeRosterStudents(rosterStudentsForTurma(capture.turma), capture.students);
+      const existing = existingGradeStudents(capture.turma);
+      const index = rosterStudentIndex(students);
+      const additions = students.filter(row => shouldExportRosterStudent(row, settings) && !matchingRosterStudent(row, existing));
+      const removedIds = new Set();
+      const removals = [...existing.byRegistro.values(), ...existing.byNome.values()].filter(row => {
+        const matching = matchingRosterStudent(row, index);
+        if (!matching || shouldExportRosterStudent(matching, settings)) return false;
+        const key = exportRowIdentity(matching).registro || canonicalName(matching.nome);
+        if (removedIds.has(key)) return false;
+        removedIds.add(key);
+        return true;
+      });
+      const remanejados = students.filter(row => row.status === "remanejado");
+      const inativos = students.filter(row => row.status === "inativo");
+      pendingRosterUpdate = { turma: capture.turma, students, settings };
+      const preview = document.getElementById("dedRosterPreview");
+      if (!preview) return;
+      preview.style.display = "block";
+      const warning = capture.expectedStudents && capture.students.length < capture.expectedStudents
+        ? `<div style="color:#9e6316;margin-top:7px;">⚠️ Apenas ${capture.students.length} linha(s) carregadas de ${capture.expectedStudents} alunos informados no DED+. Role a lista e faça outras leituras: nenhuma pessoa ausente da tela será excluída automaticamente.</div>`
+        : "";
+      preview.innerHTML = `
+        <div style="font-weight:900;color:#5b2b66;">Prévia da turma ${esc(capture.turma)}</div>
+        <div style="margin-top:5px;">${capture.students.length} aluno(s) lidos agora; ${students.length} identificados no acumulado. <b>${additions.length} inclusão(ões)</b> e <b>${removals.length} retirada(s)</b> previstas na planilha de notas.</div>
+        ${rosterListHtml("Novos na planilha", additions, "#286d43")}
+        ${rosterListHtml("Remanejados identificados", remanejados, "#3978a0")}
+        ${rosterListHtml("Inativos identificados", inativos, "#a74354")}
+        ${rosterListHtml("Retiradas efetivas", removals, "#a74354")}
+        ${warning}
+        <div style="color:#6a5970;margin-top:7px;">Somente alunos marcados no DED+ como inativos serão retirados, se a opção estiver ativa. Notas existentes são preservadas; a lista não apaga registros por estarem fora da área carregada.</div>
+        <div style="display:flex;gap:8px;margin-top:9px;">
+          <button id="dedRosterApply" style="flex:1;border:0;border-radius:10px;background:#5f8f4e;color:#fff;padding:9px;font-weight:900;cursor:pointer;">Aplicar atualização</button>
+          <button id="dedRosterCancel" style="border:1px solid #cbb0d3;border-radius:10px;background:#fff;color:#70417b;padding:9px;font-weight:800;cursor:pointer;">Cancelar</button>
+        </div>`;
+      preview.querySelector("#dedRosterApply").addEventListener("click", applyStudentRosterUpdate);
+      preview.querySelector("#dedRosterCancel").addEventListener("click", () => {
+        pendingRosterUpdate = null;
+        preview.style.display = "none";
+      });
+      logMessage(`👥 Lista da turma <b>${esc(capture.turma)}</b> lida. Confira a prévia e clique em <b>Aplicar atualização</b>.`);
+    } catch (err) {
+      pendingRosterUpdate = null;
+      console.error(err);
+      logMessage(`❌ ${esc(err.message || err)}`);
+    }
+  }
+
+  function applyStudentRosterUpdate() {
+    if (!pendingRosterUpdate) return;
+    const { turma, students, settings } = pendingRosterUpdate;
+    if (settings.removeInativos && students.some(row => row.status === "inativo")) {
+      const proceed = window.confirm("Aplicar a lista de " + turma + "? Os inativos identificados ficarão fora do próximo XLSX. As notas guardadas no widget não serão apagadas.");
+      if (!proceed) return;
+    }
+    app.studentRosters[turma] = { students, updatedAt: new Date().toISOString() };
+    app.rosterSettings[turma] = settings;
+    pendingRosterUpdate = null;
+    saveData();
+    refreshPanelData();
+    const preview = document.getElementById("dedRosterPreview");
+    if (preview) preview.style.display = "none";
+    const exported = students.filter(row => shouldExportRosterStudent(row, settings)).length;
+    logMessage(`✅ Alunos de <b>${esc(turma)}</b> atualizados. ${exported} aluno(s) da lista serão considerados no XLSX; notas existentes permanecem guardadas. Clique em <b>Baixar planilha atualizada</b>.`);
+  }
+
+  function resetStudentRoster() {
+    const turma = rosterKey(detectTurmaFromPage());
+    if (!rosterStudentsForTurma(turma).length) {
+      return logMessage("Esta turma ainda não tem lista de alunos salva.");
+    }
+    if (!window.confirm(`Reiniciar a leitura de alunos da turma ${turma}? A lista de conferência será removida, mas as notas e chamadas ficam intactas.`)) return;
+    delete app.studentRosters[turma];
+    delete app.rosterSettings[turma];
+    pendingRosterUpdate = null;
+    const preview = document.getElementById("dedRosterPreview");
+    if (preview) preview.style.display = "none";
+    saveData();
+    refreshPanelData();
+    logMessage(`Lista da turma <b>${esc(turma)}</b> reiniciada. Agora leia novamente os alunos no DED+.`);
   }
 
   function cleanOverviewActivityTitle(text) {
@@ -2525,6 +2757,8 @@ ${workbookRels}
         fileName: app.fileName,
         callData: app.callData,
         callFileName: app.callFileName,
+        studentRosters: app.studentRosters,
+        rosterSettings: app.rosterSettings,
         savedAt: new Date().toISOString()
       }));
     } catch (_) {}
@@ -2543,6 +2777,8 @@ ${workbookRels}
         app.callData = parsed.callData;
         app.callFileName = parsed.callFileName || "planilha de chamada salva";
       }
+      if (parsed?.studentRosters && typeof parsed.studentRosters === "object") app.studentRosters = parsed.studentRosters;
+      if (parsed?.rosterSettings && typeof parsed.rosterSettings === "object") app.rosterSettings = parsed.rosterSettings;
     } catch (_) {}
   }
 
@@ -2551,6 +2787,9 @@ ${workbookRels}
     app.fileName = "";
     app.callData = null;
     app.callFileName = "";
+    app.studentRosters = {};
+    app.rosterSettings = {};
+    pendingRosterUpdate = null;
     try { localStorage.removeItem(STORAGE_KEY); } catch (_) {}
     refreshPanelData();
     logMessage("Planilhas removidas do widget. Carregue outra quando quiser.");
@@ -2583,6 +2822,23 @@ ${workbookRels}
       marcacoes += dia.alunos?.length || 0;
     }));
     return { turmas, dias, faltas, marcacoes };
+  }
+
+  function refreshRosterSummary() {
+    const summary = document.getElementById("dedRosterSummary");
+    if (!summary) return;
+    const turma = rosterKey(detectTurmaFromPage());
+    const students = rosterStudentsForTurma(turma);
+    const settings = rosterOptionsForTurma(turma);
+    const moved = students.filter(s => s.status === "remanejado").length;
+    const inactive = students.filter(s => s.status === "inativo").length;
+    summary.textContent = students.length
+      ? `Turma ${turma}: ${students.length} identificados, ${moved} remanejados, ${inactive} inativos. A lista está salva no widget.`
+      : "Abra a Visão Geral da Turma no DED+ para ler os alunos e atualizar o XLSX.";
+    const includeMoved = document.getElementById("dedRosterIncludeMoved");
+    const removeInactive = document.getElementById("dedRosterRemoveInactive");
+    if (includeMoved) includeMoved.checked = settings.includeRemanejados;
+    if (removeInactive) removeInactive.checked = settings.removeInativos;
   }
 
   function refreshPanelData() {
@@ -2629,6 +2885,7 @@ ${workbookRels}
         refreshCallDays();
       }
     }
+    refreshRosterSummary();
   }
 
   function refreshActivities() {
@@ -2794,6 +3051,20 @@ ${workbookRels}
               <button id="dedNotasExportCurrent" style="background:#70417b; color:#fff; border:0; border-radius:12px; padding:10px; font-weight:900; cursor:pointer;">Baixar planilha atualizada</button>
             </div>
           </div>
+          <div style="border-top:1px solid #ead8ef; margin-top:12px; padding-top:12px;">
+            <div style="font-size:12px; font-weight:900; color:#5b2b66; margin-bottom:4px;">Atualizar relação de alunos</div>
+            <div id="dedRosterSummary" style="font-size:11px; color:#6a5970; margin-bottom:8px;">Abra a Visão Geral da Turma para ler os alunos.</div>
+            <label style="display:flex;gap:7px;align-items:center;font-size:12px;margin:6px 0;">
+              <input id="dedRosterIncludeMoved" type="checkbox" checked> Incluir remanejados
+            </label>
+            <label style="display:flex;gap:7px;align-items:center;font-size:12px;margin:6px 0 9px;">
+              <input id="dedRosterRemoveInactive" type="checkbox" checked> Retirar inativos da planilha
+            </label>
+            <button id="dedRosterRead" style="width:100%;background:#4d7fa8;color:#fff;border:0;border-radius:12px;padding:10px;font-weight:900;cursor:pointer;">Ler alunos desta turma</button>
+            <button id="dedRosterReset" style="width:100%;margin-top:6px;background:#fff;color:#70417b;border:1px solid #cbb0d3;border-radius:10px;padding:7px;font-size:11px;font-weight:800;cursor:pointer;">Reiniciar leitura desta turma</button>
+            <div id="dedRosterPreview" style="display:none;margin-top:9px;padding:10px;border:1px solid #d7bfdc;background:#fbf6fd;border-radius:12px;font-size:11px;"></div>
+            <div style="font-size:10px;color:#6a5970;margin-top:7px;">Confira a prévia e aplique. Repita a leitura após rolar a lista se o DED+ carregar alunos aos poucos. As notas já lançadas não são apagadas.</div>
+          </div>
         </section>
 
         <section style="background:#fff; border:1px solid #ead8ef; border-radius:16px; padding:10px; margin-bottom:12px;">
@@ -2911,6 +3182,8 @@ ${workbookRels}
     });
     panel.querySelector("#dedNotasReadDed").addEventListener("click", captureCurrentDedPageToSheet);
     panel.querySelector("#dedNotasExportCurrent").addEventListener("click", exportGradesWorkbook);
+    panel.querySelector("#dedRosterRead").addEventListener("click", readStudentsForSheet);
+    panel.querySelector("#dedRosterReset").addEventListener("click", resetStudentRoster);
 
     panel.querySelector("#dedCallCheck").addEventListener("click", () => {
       if (!app.callData) return logMessage("Carrega a planilha de chamada primeiro, mona.");
